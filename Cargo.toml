@@ -1,0 +1,26 @@
+[package]
+name = "apify-rust-client"
+version = "0.1.0"
+edition = "2024"
+authors = ["Lionel Machire <lionel.machire@googlemail.com>"]
+description = "Async Rust client for the Apify Cloud API — run actors, poll status, download datasets, with multi-key fallback. Generic over any actor and dataset item type."
+documentation = "https://docs.rs/apify-rust-client"
+repository = "https://github.com/Liohtml/apify-rust-client"
+homepage = "https://github.com/Liohtml/apify-rust-client"
+readme = "README.md"
+keywords = ["apify", "scraper", "actor", "client", "api"]
+categories = ["api-bindings", "web-programming::http-client"]
+license = "MIT OR Apache-2.0"
+rust-version = "1.85"
+
+[dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["time", "macros"] }
+thiserror = "1"
+tracing = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
