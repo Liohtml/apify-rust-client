@@ -1,7 +1,6 @@
 # apify-rust-client
 
-[![crates.io](https://img.shields.io/crates/v/apify-rust-client.svg)](https://crates.io/crates/apify-rust-client)
-[![docs.rs](https://docs.rs/apify-rust-client/badge.svg)](https://docs.rs/apify-rust-client)
+[![CI](https://github.com/Liohtml/apify-rust-client/actions/workflows/ci.yml/badge.svg)](https://github.com/Liohtml/apify-rust-client/actions/workflows/ci.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
 Async Rust client for the [Apify Cloud API](https://docs.apify.com/api/v2). Run any actor, poll its status, download dataset items — generic over the dataset-item type and with built-in multi-key fallback.
@@ -12,19 +11,24 @@ Apify has hundreds of pre-built scrapers ("actors") on their [store](https://api
 
 ## Features
 
-- 🚀 **Submit** an actor run with arbitrary JSON input.
+- 🚀 **Submit** an actor run with arbitrary JSON — or any `Serialize` type via `RunInput::from_serialize`.
 - ⏳ **Poll** the run status with configurable interval + timeout.
-- 📦 **Download** dataset items in pages, deserialized straight into your own struct.
-- 🔁 **Multi-key fallback** — supply several Apify tokens; if one runs out of credit, the next is tried automatically.
+- 📦 **Download** dataset items in pages, deserialized straight into your own struct, with an optional `max_items` cap to bound memory.
+- 🔁 **Multi-key fallback** — supply several Apify tokens; if one runs out of credit at submit time, the next is tried automatically.
+- ♻️ **Automatic retry** with exponential backoff for transient errors (`429`, `5xx`, network blips).
+- 🔐 Tokens are sent via the `Authorization` header, never in the URL.
 - 🪵 `tracing` integration for structured logging.
 
 ## Installation
 
+> **Note:** not yet published on crates.io — depend on it via git for now.
+
 ```toml
 [dependencies]
-apify-rust-client = "0.1"
+apify-rust-client = { git = "https://github.com/Liohtml/apify-rust-client" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 ```
 
 ## Quick start
@@ -80,8 +84,10 @@ let client = ApifyClient::new([
 # use apify_rust_client::ApifyClient;
 # use std::time::Duration;
 let client = ApifyClient::new(["your-key"])
-    .poll_interval(Duration::from_secs(15))     // default 20s
-    .max_wait(Duration::from_secs(2 * 60 * 60)); // default 1h
+    .poll_interval(Duration::from_secs(15))      // default 20s
+    .max_wait(Duration::from_secs(2 * 60 * 60))  // default 1h
+    .max_retries(5)                              // default 3 (transient errors)
+    .max_items(10_000);                          // default: no cap (download all)
 ```
 
 ## Examples
@@ -113,7 +119,8 @@ All errors are returned as `apify_rust_client::Error`:
 - `Error::AllKeysFailed(s)` — every supplied key was rejected.
 - `Error::RunFailed(s)` — actor terminated with `FAILED`/`ABORTED`/`TIMED-OUT`.
 - `Error::Timeout(d)` — polling exceeded `max_wait`.
-- `Error::ApiStatus { status, body }` — non-2xx HTTP response.
+- `Error::ApiStatus { status, body }` — non-2xx HTTP response (returned immediately for non-transient codes like 401/404).
+- `Error::InvalidActorId(s)` — the `actor_id` contained disallowed characters.
 - `Error::Http(e)` / `Error::Json(e)` — transport / parsing.
 
 ## Roadmap

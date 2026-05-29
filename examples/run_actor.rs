@@ -27,13 +27,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "maxCrawledPlacesPerSearch": 10,
     }));
 
-    let handle = client.run_actor("compass~crawler-google-places", input).await?;
+    let handle = client
+        .run_actor("compass~crawler-google-places", input)
+        .await?;
     println!("run_id = {}", handle.run_id);
 
     let places: Vec<Place> = handle.wait_for_dataset().await?;
     println!("Got {} places", places.len());
     for p in places.iter().take(5) {
-        println!(" - {:?}  → {:?}", p.title, p.website);
+        println!(" - {:?} @ {:?}  → {:?}", p.title, p.address, p.website);
     }
 
     Ok(())

@@ -6,11 +6,15 @@
 //!
 //! ## Features
 //!
-//! - 🚀 Submit a run with arbitrary JSON input
+//! - 🚀 Submit a run with arbitrary JSON input (or any `Serialize` type)
 //! - ⏳ Poll the run status with configurable interval + timeout
-//! - 📦 Download dataset items in pages, deserialized into your own struct
+//! - 📦 Download dataset items in pages, deserialized into your own struct,
+//!   with an optional cap to bound memory use
 //! - 🔁 **Multi-key fallback** — supply several Apify tokens; if one runs out
-//!   of credit / fails, the next one is tried automatically
+//!   of credit / fails at submit time, the next one is tried automatically
+//! - ♻️ Automatic retry with exponential backoff for transient errors
+//!   (`429`, `5xx`, network blips)
+//! - 🔐 Tokens sent via the `Authorization` header, never in the URL
 //! - 🪵 `tracing` integration for structured logging
 //!
 //! ## Quick start
@@ -51,11 +55,13 @@
 
 use std::time::{Duration, Instant};
 
-use reqwest::Client;
-use serde::{Deserialize, de::DeserializeOwned};
+use reqwest::{Client, RequestBuilder, StatusCode};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tracing::{info, warn};
 
 const DEFAULT_API_BASE: &str = "https://api.apify.com/v2";
+/// Maximum number of items requested per dataset page.
+const MAX_PAGE: usize = 1000;
 
 /// All errors this crate produces.
 #[derive(Debug, thiserror::Error)]
@@ -89,6 +95,10 @@ pub enum Error {
     #[error("actor run timed out after {0:?}")]
     Timeout(Duration),
 
+    /// The supplied `actor_id` contains characters that are not allowed.
+    #[error("invalid actor id: {0:?}")]
+    InvalidActorId(String),
+
     /// No API keys were provided.
     #[error("no API keys provided")]
     NoKeys,
@@ -105,9 +115,21 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub struct RunInput(pub serde_json::Value);
 
 impl RunInput {
-    /// Build a `RunInput` from any serializable value.
+    /// Build a `RunInput` from a [`serde_json::Value`].
     pub fn new(v: serde_json::Value) -> Self {
         Self(v)
+    }
+
+    /// Build a `RunInput` from any [`Serialize`] type, e.g. a typed input struct.
+    ///
+    /// ```
+    /// # use apify_rust_client::RunInput;
+    /// #[derive(serde::Serialize)]
+    /// struct In { query: String, max_items: u32 }
+    /// let input = RunInput::from_serialize(In { query: "rust".into(), max_items: 10 }).unwrap();
+    /// ```
+    pub fn from_serialize<T: Serialize>(value: T) -> Result<Self> {
+        Ok(Self(serde_json::to_value(value)?))
     }
 }
 
@@ -119,6 +141,8 @@ pub struct ApifyClient {
     api_base: String,
     poll_interval: Duration,
     max_wait: Duration,
+    max_retries: u32,
+    max_items: Option<usize>,
 }
 
 impl ApifyClient {
@@ -138,6 +162,8 @@ impl ApifyClient {
             api_base: DEFAULT_API_BASE.to_string(),
             poll_interval: Duration::from_secs(20),
             max_wait: Duration::from_secs(60 * 60),
+            max_retries: 3,
+            max_items: None,
         }
     }
 
@@ -153,9 +179,41 @@ impl ApifyClient {
         self
     }
 
+    /// Number of retry attempts for transient errors — `429`, `5xx` and
+    /// network errors (default: 3). Set to 0 to disable retries.
+    pub fn max_retries(mut self, n: u32) -> Self {
+        self.max_retries = n;
+        self
+    }
+
+    /// Cap the total number of dataset items downloaded by
+    /// [`RunHandle::fetch_dataset_items`] / [`RunHandle::wait_for_dataset`].
+    ///
+    /// Without a cap, the entire dataset is buffered in memory, which can
+    /// OOM the process on very large datasets. Default: no cap.
+    pub fn max_items(mut self, n: usize) -> Self {
+        self.max_items = Some(n);
+        self
+    }
+
     /// Override the API base URL (rarely needed; for testing).
+    ///
+    /// A trailing slash is stripped. For security, non-HTTPS bases are
+    /// rejected (and ignored, keeping the previous value) unless they point
+    /// at `localhost`/`127.0.0.1`, since the `Authorization` header would
+    /// otherwise be transmitted in plaintext.
     pub fn api_base(mut self, base: impl Into<String>) -> Self {
-        self.api_base = base.into();
+        let base = base.into();
+        let trimmed = base.trim_end_matches('/').to_string();
+        if is_secure_base(&trimmed) {
+            self.api_base = trimmed;
+        } else {
+            warn!(
+                rejected = %trimmed,
+                kept = %self.api_base,
+                "api_base is not HTTPS (and not localhost); ignoring it"
+            );
+        }
         self
     }
 
@@ -167,6 +225,7 @@ impl ApifyClient {
         if self.api_keys.is_empty() {
             return Err(Error::NoKeys);
         }
+        validate_actor_id(actor_id)?;
         let mut last_err: Option<String> = None;
         for (i, key) in self.api_keys.iter().enumerate() {
             info!(key_index = i, actor_id, "submitting run");
@@ -186,7 +245,9 @@ impl ApifyClient {
                 }
             }
         }
-        Err(Error::AllKeysFailed(last_err.unwrap_or_else(|| "unknown".into())))
+        Err(Error::AllKeysFailed(
+            last_err.unwrap_or_else(|| "unknown".into()),
+        ))
     }
 
     async fn submit_run(
@@ -195,21 +256,59 @@ impl ApifyClient {
         input: &serde_json::Value,
         api_key: &str,
     ) -> Result<RunInfo> {
-        let url = format!("{}/acts/{}/runs?token={}", self.api_base, actor_id, api_key);
-        let resp = self.http.post(&url).json(input).send().await?;
-        let status = resp.status();
+        let url = format!("{}/acts/{}/runs", self.api_base, actor_id);
+        let resp = self
+            .send_with_retry(|| self.http.post(&url).bearer_auth(api_key).json(input))
+            .await?;
         let body = resp.text().await.unwrap_or_default();
-        if !status.is_success() {
-            return Err(Error::ApiStatus {
-                status: status.as_u16(),
-                body: body.chars().take(400).collect(),
-            });
-        }
         let parsed: ApiResp<RunData> = serde_json::from_str(&body)?;
         Ok(RunInfo {
             run_id: parsed.data.id,
             dataset_id: parsed.data.default_dataset_id,
         })
+    }
+
+    /// Send a request, retrying transient failures with exponential backoff.
+    ///
+    /// `make` is called once per attempt so the request (and its body) can be
+    /// rebuilt. On a successful (2xx) response the [`reqwest::Response`] is
+    /// returned. Non-transient HTTP errors return [`Error::ApiStatus`]
+    /// immediately without retrying.
+    async fn send_with_retry<F>(&self, make: F) -> Result<reqwest::Response>
+    where
+        F: Fn() -> RequestBuilder,
+    {
+        let mut attempt: u32 = 0;
+        loop {
+            match make().send().await {
+                Ok(resp) => {
+                    let status = resp.status();
+                    if status.is_success() {
+                        return Ok(resp);
+                    }
+                    if is_transient_status(status) && attempt < self.max_retries {
+                        warn!(%status, attempt, "transient HTTP error; retrying");
+                        backoff(attempt).await;
+                        attempt += 1;
+                        continue;
+                    }
+                    let body = resp.text().await.unwrap_or_default();
+                    return Err(Error::ApiStatus {
+                        status: status.as_u16(),
+                        body: body.chars().take(400).collect(),
+                    });
+                }
+                Err(e) => {
+                    if attempt < self.max_retries {
+                        warn!(error = %e, attempt, "transient network error; retrying");
+                        backoff(attempt).await;
+                        attempt += 1;
+                        continue;
+                    }
+                    return Err(e.into());
+                }
+            }
+        }
     }
 }
 
@@ -224,9 +323,10 @@ pub struct RunHandle<'c> {
     pub dataset_id: String,
 }
 
-impl<'c> RunHandle<'c> {
+impl RunHandle<'_> {
     /// Poll until the actor run is `SUCCEEDED`, then download all dataset
-    /// items, deserialized into `Vec<T>`.
+    /// items (subject to the client's `max_items` cap, if any), deserialized
+    /// into `Vec<T>`.
     pub async fn wait_for_dataset<T: DeserializeOwned>(&self) -> Result<Vec<T>> {
         self.wait_for_status().await?;
         self.fetch_dataset_items().await
@@ -235,30 +335,21 @@ impl<'c> RunHandle<'c> {
     /// Poll until the actor run reaches a terminal status.
     pub async fn wait_for_status(&self) -> Result<()> {
         let started = Instant::now();
+        let url = format!("{}/actor-runs/{}", self.client.api_base, self.run_id);
         loop {
-            if started.elapsed() > self.client.max_wait {
-                return Err(Error::Timeout(self.client.max_wait));
-            }
-            tokio::time::sleep(self.client.poll_interval).await;
-            let url = format!(
-                "{}/actor-runs/{}?token={}",
-                self.client.api_base, self.run_id, self.api_key
-            );
-            let resp = match self.client.http.get(&url).send().await {
-                Ok(r) => r,
-                Err(e) => {
-                    warn!("status poll error: {e}");
-                    continue;
-                }
+            let remaining = match self.client.max_wait.checked_sub(started.elapsed()) {
+                Some(r) if !r.is_zero() => r,
+                _ => return Err(Error::Timeout(self.client.max_wait)),
             };
+            // Never sleep past the deadline (handles poll_interval > max_wait).
+            tokio::time::sleep(remaining.min(self.client.poll_interval)).await;
+
+            let resp = self
+                .client
+                .send_with_retry(|| self.client.http.get(&url).bearer_auth(&self.api_key))
+                .await?;
             let body = resp.text().await.unwrap_or_default();
-            let parsed: ApiResp<StatusData> = match serde_json::from_str(&body) {
-                Ok(p) => p,
-                Err(e) => {
-                    warn!("status JSON: {e}");
-                    continue;
-                }
-            };
+            let parsed: ApiResp<StatusData> = serde_json::from_str(&body)?;
             info!(run_id = %self.run_id, status = %parsed.data.status, "run status");
             match parsed.data.status.as_str() {
                 "SUCCEEDED" => return Ok(()),
@@ -270,36 +361,89 @@ impl<'c> RunHandle<'c> {
         }
     }
 
-    /// Fetch all dataset items in pages of `limit`, deserialized into `T`.
+    /// Fetch dataset items in pages, deserialized into `T`.
+    ///
+    /// Downloads the whole dataset unless the client was configured with
+    /// [`ApifyClient::max_items`], in which case at most that many items are
+    /// returned.
     pub async fn fetch_dataset_items<T: DeserializeOwned>(&self) -> Result<Vec<T>> {
         let mut out: Vec<T> = Vec::new();
         let mut offset: usize = 0;
-        let limit: usize = 1000;
         loop {
-            let url = format!(
-                "{}/datasets/{}/items?format=json&clean=true&limit={}&offset={}&token={}",
-                self.client.api_base, self.dataset_id, limit, offset, self.api_key
-            );
-            let resp = self.client.http.get(&url).send().await?;
-            let status = resp.status();
-            if !status.is_success() {
-                let body = resp.text().await.unwrap_or_default();
-                return Err(Error::ApiStatus {
-                    status: status.as_u16(),
-                    body: body.chars().take(400).collect(),
-                });
+            let remaining = match self.client.max_items {
+                Some(cap) => cap.saturating_sub(out.len()),
+                None => usize::MAX,
+            };
+            if remaining == 0 {
+                break;
             }
+            let page = remaining.min(MAX_PAGE);
+            let url = format!(
+                "{}/datasets/{}/items?format=json&clean=true&limit={}&offset={}",
+                self.client.api_base, self.dataset_id, page, offset
+            );
+            let resp = self
+                .client
+                .send_with_retry(|| self.client.http.get(&url).bearer_auth(&self.api_key))
+                .await?;
             let chunk: Vec<T> = resp.json().await?;
             let n = chunk.len();
             out.extend(chunk);
             info!(offset, batch = n, total_so_far = out.len(), "dataset chunk");
-            if n < limit {
+            if n < page {
                 break;
             }
             offset += n;
         }
         Ok(out)
     }
+}
+
+// ───────── helpers ─────────
+
+/// Validate an actor id / slug, rejecting values that could escape the
+/// intended URL path (e.g. `../`).
+fn validate_actor_id(id: &str) -> Result<()> {
+    let ok = !id.is_empty()
+        && !id.contains("..")
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '~' | '_' | '-' | '/' | '.'));
+    if ok {
+        Ok(())
+    } else {
+        Err(Error::InvalidActorId(id.to_string()))
+    }
+}
+
+/// Whether a base URL is safe to transmit credentials over: HTTPS, or a
+/// local loopback address (allowed for testing).
+fn is_secure_base(base: &str) -> bool {
+    if base.starts_with("https://") {
+        return true;
+    }
+    // Allow loopback over plain HTTP, but only when the host is *exactly*
+    // localhost/127.0.0.1 — i.e. followed by a port, a path, or end-of-string.
+    // This rejects look-alikes such as `http://localhost.evil.com`.
+    for prefix in ["http://localhost", "http://127.0.0.1"] {
+        if let Some(rest) = base.strip_prefix(prefix) {
+            if rest.is_empty() || rest.starts_with(':') || rest.starts_with('/') {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// HTTP status codes that warrant a retry.
+fn is_transient_status(status: StatusCode) -> bool {
+    matches!(status.as_u16(), 429 | 500 | 502 | 503 | 504)
+}
+
+/// Exponential backoff: 200ms, 400ms, 800ms, … capped at 10s.
+async fn backoff(attempt: u32) {
+    let millis = 200u64.saturating_mul(1u64 << attempt.min(6));
+    tokio::time::sleep(Duration::from_millis(millis.min(10_000))).await;
 }
 
 // ───────── internal API types ─────────
@@ -345,10 +489,83 @@ mod tests {
         let c = ApifyClient::new(["abc"])
             .poll_interval(Duration::from_secs(5))
             .max_wait(Duration::from_secs(900))
+            .max_retries(5)
+            .max_items(50)
             .api_base("https://example.com/v2");
         assert_eq!(c.api_keys, vec!["abc"]);
         assert_eq!(c.poll_interval, Duration::from_secs(5));
         assert_eq!(c.max_wait, Duration::from_secs(900));
+        assert_eq!(c.max_retries, 5);
+        assert_eq!(c.max_items, Some(50));
         assert_eq!(c.api_base, "https://example.com/v2");
+    }
+
+    #[test]
+    fn api_base_strips_trailing_slash() {
+        let c = ApifyClient::new(["k"]).api_base("https://api.apify.com/v2/");
+        assert_eq!(c.api_base, "https://api.apify.com/v2");
+    }
+
+    #[test]
+    fn api_base_rejects_insecure() {
+        let c = ApifyClient::new(["k"]).api_base("http://evil.example.com/v2");
+        // insecure base ignored, default retained
+        assert_eq!(c.api_base, DEFAULT_API_BASE);
+    }
+
+    #[test]
+    fn api_base_allows_localhost_http() {
+        let c = ApifyClient::new(["k"]).api_base("http://localhost:8080/v2");
+        assert_eq!(c.api_base, "http://localhost:8080/v2");
+    }
+
+    #[test]
+    fn is_secure_base_rejects_lookalike_loopback() {
+        // exact loopback hosts are fine
+        assert!(is_secure_base("http://localhost"));
+        assert!(is_secure_base("http://localhost:8080/v2"));
+        assert!(is_secure_base("http://127.0.0.1/v2"));
+        assert!(is_secure_base("https://api.apify.com/v2"));
+        // look-alike subdomains must NOT pass
+        assert!(!is_secure_base("http://localhost.evil.com/v2"));
+        assert!(!is_secure_base("http://127.0.0.1.evil.com/v2"));
+        assert!(!is_secure_base("http://evil.com/v2"));
+    }
+
+    #[test]
+    fn actor_id_validation() {
+        assert!(validate_actor_id("compass~crawler-google-places").is_ok());
+        assert!(validate_actor_id("apify/web-scraper").is_ok());
+        assert!(validate_actor_id("aBc123_~-.").is_ok());
+        assert!(validate_actor_id("").is_err());
+        assert!(validate_actor_id("../../admin").is_err());
+        assert!(validate_actor_id("foo bar").is_err());
+        assert!(validate_actor_id("foo?token=x").is_err());
+    }
+
+    #[test]
+    fn run_input_from_serialize() {
+        #[derive(Serialize)]
+        struct In {
+            query: String,
+            max_items: u32,
+        }
+        let input = RunInput::from_serialize(In {
+            query: "rust".into(),
+            max_items: 10,
+        })
+        .unwrap();
+        assert_eq!(input.0["query"], "rust");
+        assert_eq!(input.0["max_items"], 10);
+    }
+
+    #[test]
+    fn transient_status_classification() {
+        for code in [429u16, 500, 502, 503, 504] {
+            assert!(is_transient_status(StatusCode::from_u16(code).unwrap()));
+        }
+        for code in [200u16, 400, 401, 403, 404] {
+            assert!(!is_transient_status(StatusCode::from_u16(code).unwrap()));
+        }
     }
 }
