@@ -419,9 +419,20 @@ fn validate_actor_id(id: &str) -> Result<()> {
 /// Whether a base URL is safe to transmit credentials over: HTTPS, or a
 /// local loopback address (allowed for testing).
 fn is_secure_base(base: &str) -> bool {
-    base.starts_with("https://")
-        || base.starts_with("http://localhost")
-        || base.starts_with("http://127.0.0.1")
+    if base.starts_with("https://") {
+        return true;
+    }
+    // Allow loopback over plain HTTP, but only when the host is *exactly*
+    // localhost/127.0.0.1 — i.e. followed by a port, a path, or end-of-string.
+    // This rejects look-alikes such as `http://localhost.evil.com`.
+    for prefix in ["http://localhost", "http://127.0.0.1"] {
+        if let Some(rest) = base.strip_prefix(prefix) {
+            if rest.is_empty() || rest.starts_with(':') || rest.starts_with('/') {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// HTTP status codes that warrant a retry.
@@ -506,6 +517,19 @@ mod tests {
     fn api_base_allows_localhost_http() {
         let c = ApifyClient::new(["k"]).api_base("http://localhost:8080/v2");
         assert_eq!(c.api_base, "http://localhost:8080/v2");
+    }
+
+    #[test]
+    fn is_secure_base_rejects_lookalike_loopback() {
+        // exact loopback hosts are fine
+        assert!(is_secure_base("http://localhost"));
+        assert!(is_secure_base("http://localhost:8080/v2"));
+        assert!(is_secure_base("http://127.0.0.1/v2"));
+        assert!(is_secure_base("https://api.apify.com/v2"));
+        // look-alike subdomains must NOT pass
+        assert!(!is_secure_base("http://localhost.evil.com/v2"));
+        assert!(!is_secure_base("http://127.0.0.1.evil.com/v2"));
+        assert!(!is_secure_base("http://evil.com/v2"));
     }
 
     #[test]
