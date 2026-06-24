@@ -53,6 +53,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+use std::fmt;
 use std::time::{Duration, Instant};
 
 use reqwest::{Client, RequestBuilder, StatusCode};
@@ -134,7 +135,7 @@ impl RunInput {
 }
 
 /// The Apify client. Holds the HTTP client + ordered list of tokens.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ApifyClient {
     http: Client,
     api_keys: Vec<String>,
@@ -145,26 +146,60 @@ pub struct ApifyClient {
     max_items: Option<usize>,
 }
 
+// Manual `Debug` impl: the auto-derived one would print the API tokens in
+// plaintext anywhere the client is formatted with `{:?}` (tracing fields,
+// `dbg!`, panic messages). Redact them.
+impl fmt::Debug for ApifyClient {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ApifyClient")
+            .field(
+                "api_keys",
+                &format_args!("[{} key(s) redacted]", self.api_keys.len()),
+            )
+            .field("api_base", &self.api_base)
+            .field("poll_interval", &self.poll_interval)
+            .field("max_wait", &self.max_wait)
+            .field("max_retries", &self.max_retries)
+            .field("max_items", &self.max_items)
+            .finish()
+    }
+}
+
 impl ApifyClient {
     /// Construct a client with one or more API tokens.
     /// Tokens are tried in order; the first that succeeds is used.
+    ///
+    /// # Panics
+    /// Panics if the underlying HTTP client cannot be built (e.g. TLS backend
+    /// initialization failure). Use [`ApifyClient::try_new`] to handle that
+    /// case gracefully.
     pub fn new<I, S>(api_keys: I) -> Self
     where
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
-        Self {
+        Self::try_new(api_keys).expect("failed to build reqwest client")
+    }
+
+    /// Fallible constructor: returns [`Error::Http`] instead of panicking if
+    /// the underlying HTTP client cannot be built.
+    pub fn try_new<I, S>(api_keys: I) -> Result<Self>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        Ok(Self {
             http: Client::builder()
                 .timeout(Duration::from_secs(60))
                 .build()
-                .expect("reqwest client"),
+                .map_err(Error::Http)?,
             api_keys: api_keys.into_iter().map(Into::into).collect(),
             api_base: DEFAULT_API_BASE.to_string(),
             poll_interval: Duration::from_secs(20),
             max_wait: Duration::from_secs(60 * 60),
             max_retries: 3,
             max_items: None,
-        }
+        })
     }
 
     /// Override the polling interval (default: 20 s).
@@ -239,10 +274,15 @@ impl ApifyClient {
                         dataset_id: r.dataset_id,
                     });
                 }
-                Err(e) => {
-                    warn!(key_index = i, "submit failed: {e}");
+                // Only rotate to the next key when the failure is plausibly
+                // key-related. A 404/400 means a bad actor id or input — the
+                // same request will fail identically for every key, so surface
+                // it immediately instead of masking it as `AllKeysFailed`.
+                Err(e) if should_rotate_key(&e) => {
+                    warn!(key_index = i, "submit failed (key issue): {e}");
                     last_err = Some(e.to_string());
                 }
+                Err(e) => return Err(e),
             }
         }
         Err(Error::AllKeysFailed(
@@ -260,7 +300,7 @@ impl ApifyClient {
         let resp = self
             .send_with_retry(|| self.http.post(&url).bearer_auth(api_key).json(input))
             .await?;
-        let body = resp.text().await.unwrap_or_default();
+        let body = resp.text().await?;
         let parsed: ApiResp<RunData> = serde_json::from_str(&body)?;
         Ok(RunInfo {
             run_id: parsed.data.id,
@@ -293,6 +333,9 @@ impl ApifyClient {
                         continue;
                     }
                     let body = resp.text().await.unwrap_or_default();
+                    // Here `unwrap_or_default` is intentional: we already know
+                    // the request failed with `status`; a body-read error must
+                    // not shadow that more useful status code.
                     return Err(Error::ApiStatus {
                         status: status.as_u16(),
                         body: body.chars().take(400).collect(),
@@ -323,6 +366,16 @@ pub struct RunHandle<'c> {
     pub dataset_id: String,
 }
 
+// Manual `Debug` that omits the secret `api_key` (and the noisy client ref).
+impl fmt::Debug for RunHandle<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RunHandle")
+            .field("run_id", &self.run_id)
+            .field("dataset_id", &self.dataset_id)
+            .finish_non_exhaustive()
+    }
+}
+
 impl RunHandle<'_> {
     /// Poll until the actor run is `SUCCEEDED`, then download all dataset
     /// items (subject to the client's `max_items` cap, if any), deserialized
@@ -337,18 +390,13 @@ impl RunHandle<'_> {
         let started = Instant::now();
         let url = format!("{}/actor-runs/{}", self.client.api_base, self.run_id);
         loop {
-            let remaining = match self.client.max_wait.checked_sub(started.elapsed()) {
-                Some(r) if !r.is_zero() => r,
-                _ => return Err(Error::Timeout(self.client.max_wait)),
-            };
-            // Never sleep past the deadline (handles poll_interval > max_wait).
-            tokio::time::sleep(remaining.min(self.client.poll_interval)).await;
-
+            // Poll first, then sleep: a run that finished quickly is detected
+            // immediately instead of always paying one `poll_interval`.
             let resp = self
                 .client
                 .send_with_retry(|| self.client.http.get(&url).bearer_auth(&self.api_key))
                 .await?;
-            let body = resp.text().await.unwrap_or_default();
+            let body = resp.text().await?;
             let parsed: ApiResp<StatusData> = serde_json::from_str(&body)?;
             info!(run_id = %self.run_id, status = %parsed.data.status, "run status");
             match parsed.data.status.as_str() {
@@ -356,8 +404,14 @@ impl RunHandle<'_> {
                 "FAILED" | "ABORTED" | "TIMED-OUT" | "TIMED_OUT" => {
                     return Err(Error::RunFailed(parsed.data.status));
                 }
-                _ => continue,
+                _ => {}
             }
+            // Not terminal yet: check the deadline, then sleep (never past it).
+            let remaining = match self.client.max_wait.checked_sub(started.elapsed()) {
+                Some(r) if !r.is_zero() => r,
+                _ => return Err(Error::Timeout(self.client.max_wait)),
+            };
+            tokio::time::sleep(remaining.min(self.client.poll_interval)).await;
         }
     }
 
@@ -367,9 +421,16 @@ impl RunHandle<'_> {
     /// [`ApifyClient::max_items`], in which case at most that many items are
     /// returned.
     pub async fn fetch_dataset_items<T: DeserializeOwned>(&self) -> Result<Vec<T>> {
+        let started = Instant::now();
         let mut out: Vec<T> = Vec::new();
         let mut offset: usize = 0;
         loop {
+            // Bound the download phase by `max_wait` so a huge dataset cannot
+            // loop indefinitely. Note this is a per-phase budget: a full
+            // `wait_for_dataset` (poll + download) may take up to ~2×max_wait.
+            if started.elapsed() >= self.client.max_wait {
+                return Err(Error::Timeout(self.client.max_wait));
+            }
             let remaining = match self.client.max_items {
                 Some(cap) => cap.saturating_sub(out.len()),
                 None => usize::MAX,
@@ -438,6 +499,22 @@ fn is_secure_base(base: &str) -> bool {
 /// HTTP status codes that warrant a retry.
 fn is_transient_status(status: StatusCode) -> bool {
     matches!(status.as_u16(), 429 | 500 | 502 | 503 | 504)
+}
+
+/// Whether a submit failure justifies trying the next API key.
+///
+/// Bad-request errors (wrong actor id / malformed input) are identical for
+/// every key, so they surface immediately. Everything else — auth (401/403),
+/// exhausted credit (402), rate limit (429), server errors (5xx), and
+/// transport/parse failures — may be key- or attempt-specific, so the next
+/// key is worth trying. This preserves the advertised multi-key fallback for
+/// the "key ran out of credit" case while still failing fast on a typo'd
+/// actor id.
+fn should_rotate_key(e: &Error) -> bool {
+    match e {
+        Error::ApiStatus { status, .. } => !matches!(status, 400 | 404 | 405 | 422),
+        _ => true,
+    }
 }
 
 /// Exponential backoff: 200ms, 400ms, 800ms, … capped at 10s.
@@ -567,5 +644,49 @@ mod tests {
         for code in [200u16, 400, 401, 403, 404] {
             assert!(!is_transient_status(StatusCode::from_u16(code).unwrap()));
         }
+    }
+
+    #[test]
+    fn try_new_builds_client() {
+        let c = ApifyClient::try_new(["k"]).expect("client builds");
+        assert_eq!(c.api_keys, vec!["k"]);
+    }
+
+    #[test]
+    fn should_rotate_key_only_on_non_request_errors() {
+        let api = |status| Error::ApiStatus {
+            status,
+            body: String::new(),
+        };
+        // key-scoped / credit / rate-limit / server / transport → rotate
+        assert!(should_rotate_key(&api(401)));
+        assert!(should_rotate_key(&api(402))); // exhausted credit — headline case
+        assert!(should_rotate_key(&api(403)));
+        assert!(should_rotate_key(&api(429)));
+        assert!(should_rotate_key(&api(500)));
+        assert!(should_rotate_key(&api(503)));
+        // bad-request errors → surface immediately, identical for every key
+        assert!(!should_rotate_key(&api(400)));
+        assert!(!should_rotate_key(&api(404)));
+        assert!(!should_rotate_key(&api(405)));
+        assert!(!should_rotate_key(&api(422)));
+    }
+
+    #[test]
+    fn debug_redacts_api_keys() {
+        let c = ApifyClient::new(["super-secret-token"]);
+        let s = format!("{c:?}");
+        assert!(!s.contains("super-secret-token"), "token leaked: {s}");
+        assert!(s.contains("redacted"));
+
+        let h = RunHandle {
+            client: &c,
+            api_key: "super-secret-token".into(),
+            run_id: "run123".into(),
+            dataset_id: "ds456".into(),
+        };
+        let s = format!("{h:?}");
+        assert!(!s.contains("super-secret-token"), "token leaked: {s}");
+        assert!(s.contains("run123") && s.contains("ds456"));
     }
 }
