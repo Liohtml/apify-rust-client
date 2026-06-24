@@ -1,5 +1,7 @@
 # apify-rust-client
 
+[![crates.io](https://img.shields.io/crates/v/apify-rust-client.svg)](https://crates.io/crates/apify-rust-client)
+[![docs.rs](https://img.shields.io/docsrs/apify-rust-client)](https://docs.rs/apify-rust-client)
 [![CI](https://github.com/Liohtml/apify-rust-client/actions/workflows/ci.yml/badge.svg)](https://github.com/Liohtml/apify-rust-client/actions/workflows/ci.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
@@ -21,11 +23,9 @@ Apify has hundreds of pre-built scrapers ("actors") on their [store](https://api
 
 ## Installation
 
-> **Note:** not yet published on crates.io — depend on it via git for now.
-
 ```toml
 [dependencies]
-apify-rust-client = { git = "https://github.com/Liohtml/apify-rust-client" }
+apify-rust-client = "0.1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

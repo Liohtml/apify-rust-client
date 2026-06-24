@@ -18,6 +18,10 @@
   `max_items` cap (#16, #25).
 
 ### CI
+- Add a `release` workflow that runs `cargo publish` on a pushed `v*` tag
+  (using the `CRATES_IO_TOKEN` secret) and verifies the tag matches the
+  Cargo.toml version; README/badges switched to the crates.io form in
+  preparation for the first publish (#27).
 - Pin all GitHub Actions to commit SHAs and add Dependabot (github-actions +
   cargo) to keep them current — closes the tag-repoint supply-chain risk (#15).
 - Add an MSRV job that builds on Rust 1.85 so the declared `rust-version` is
