@@ -425,8 +425,9 @@ impl RunHandle<'_> {
         let mut out: Vec<T> = Vec::new();
         let mut offset: usize = 0;
         loop {
-            // Bound the overall download time the same way polling is bounded,
-            // so a huge dataset cannot loop indefinitely.
+            // Bound the download phase by `max_wait` so a huge dataset cannot
+            // loop indefinitely. Note this is a per-phase budget: a full
+            // `wait_for_dataset` (poll + download) may take up to ~2×max_wait.
             if started.elapsed() >= self.client.max_wait {
                 return Err(Error::Timeout(self.client.max_wait));
             }
@@ -500,14 +501,19 @@ fn is_transient_status(status: StatusCode) -> bool {
     matches!(status.as_u16(), 429 | 500 | 502 | 503 | 504)
 }
 
-/// Whether a submit failure justifies trying the next API key. Only
-/// key-scoped problems (auth/credit) and transport errors rotate; request
-/// errors like 404/400 are the same for every key and surface immediately.
+/// Whether a submit failure justifies trying the next API key.
+///
+/// Bad-request errors (wrong actor id / malformed input) are identical for
+/// every key, so they surface immediately. Everything else — auth (401/403),
+/// exhausted credit (402), rate limit (429), server errors (5xx), and
+/// transport/parse failures — may be key- or attempt-specific, so the next
+/// key is worth trying. This preserves the advertised multi-key fallback for
+/// the "key ran out of credit" case while still failing fast on a typo'd
+/// actor id.
 fn should_rotate_key(e: &Error) -> bool {
     match e {
-        Error::ApiStatus { status, .. } => matches!(status, 401 | 403 | 429),
-        Error::Http(_) => true,
-        _ => false,
+        Error::ApiStatus { status, .. } => !matches!(status, 400 | 404 | 405 | 422),
+        _ => true,
     }
 }
 
@@ -647,20 +653,23 @@ mod tests {
     }
 
     #[test]
-    fn should_rotate_key_only_on_key_errors() {
+    fn should_rotate_key_only_on_non_request_errors() {
         let api = |status| Error::ApiStatus {
             status,
             body: String::new(),
         };
-        // key-scoped / transport → rotate
+        // key-scoped / credit / rate-limit / server / transport → rotate
         assert!(should_rotate_key(&api(401)));
+        assert!(should_rotate_key(&api(402))); // exhausted credit — headline case
         assert!(should_rotate_key(&api(403)));
         assert!(should_rotate_key(&api(429)));
-        // request errors → surface immediately
-        assert!(!should_rotate_key(&api(404)));
+        assert!(should_rotate_key(&api(500)));
+        assert!(should_rotate_key(&api(503)));
+        // bad-request errors → surface immediately, identical for every key
         assert!(!should_rotate_key(&api(400)));
-        assert!(!should_rotate_key(&Error::RunFailed("FAILED".into())));
-        assert!(!should_rotate_key(&Error::InvalidActorId("x".into())));
+        assert!(!should_rotate_key(&api(404)));
+        assert!(!should_rotate_key(&api(405)));
+        assert!(!should_rotate_key(&api(422)));
     }
 
     #[test]

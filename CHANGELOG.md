@@ -27,9 +27,10 @@
   timeout is enforced even when `poll_interval > max_wait` (#2, #3).
 - `wait_for_status` polls before sleeping, so fast runs are detected
   immediately instead of always waiting one `poll_interval` (#21, #24).
-- `run_actor` only rotates to the next API key on key-scoped failures
-  (401/403/429/transport); a 404/400 (bad actor id or input) is surfaced
-  immediately instead of being masked as `AllKeysFailed` (#22).
+- `run_actor` surfaces bad-request failures (400/404/405/422 — wrong actor id
+  or input) immediately instead of masking them as `AllKeysFailed`, while still
+  rotating to the next key on auth/credit (401/402/403), rate-limit, server, and
+  transport errors so the multi-key fallback still covers exhausted credit (#22).
 - `fetch_dataset_items` now enforces the `max_wait` deadline so a huge dataset
   cannot loop indefinitely (#23).
 - Body-read transport errors are propagated as `Error::Http` instead of being
