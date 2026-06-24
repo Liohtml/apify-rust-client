@@ -1,0 +1,14 @@
+version: 2
+updates:
+  # Keep the pinned action SHAs current (Dependabot bumps the SHA and the
+  # trailing `# vX.Y.Z` comment together).
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+
+  # Rust dependency updates.
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
