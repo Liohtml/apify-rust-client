@@ -3,6 +3,8 @@
 ## [Unreleased]
 
 ### Security
+- `Debug` for `ApifyClient` and `RunHandle` is now hand-written and redacts the
+  API tokens, so they no longer leak via `{:?}` / `tracing` / `dbg!` (#28, #26).
 - API tokens are now sent via the `Authorization: Bearer` header instead of the
   URL query string, so they no longer leak into server/proxy access logs (#1).
 - `actor_id` is validated against an allowlist to prevent URL path injection (#5).
@@ -10,6 +12,8 @@
   transmitting credentials in plaintext (#4).
 
 ### Added
+- `ApifyClient::try_new` — fallible constructor returning `Error::Http` instead
+  of panicking when the HTTP client cannot be built (#19).
 - `ApifyClient::max_retries` — automatic retry with exponential backoff for
   transient errors (`429`, `5xx`, network blips); default 3 (#9).
 - `ApifyClient::max_items` — cap the number of dataset items downloaded to
@@ -21,6 +25,15 @@
 - `wait_for_status` now surfaces HTTP errors (401/429/500/…) instead of masking
   them as `Timeout`, and clamps its sleep to the remaining `max_wait` so the
   timeout is enforced even when `poll_interval > max_wait` (#2, #3).
+- `wait_for_status` polls before sleeping, so fast runs are detected
+  immediately instead of always waiting one `poll_interval` (#21, #24).
+- `run_actor` only rotates to the next API key on key-scoped failures
+  (401/403/429/transport); a 404/400 (bad actor id or input) is surfaced
+  immediately instead of being masked as `AllKeysFailed` (#22).
+- `fetch_dataset_items` now enforces the `max_wait` deadline so a huge dataset
+  cannot loop indefinitely (#23).
+- Body-read transport errors are propagated as `Error::Http` instead of being
+  silently turned into a misleading JSON parse error (#30).
 - `api_base` strips a trailing slash to avoid malformed double-slash URLs (#11).
 
 ## [0.1.0] - 2026-05-02
