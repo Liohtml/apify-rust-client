@@ -11,6 +11,14 @@
 - `api_base` rejects non-HTTPS URLs (except `localhost`/`127.0.0.1`) to avoid
   transmitting credentials in plaintext (#4).
 
+### CI
+- Pin all GitHub Actions to commit SHAs and add Dependabot (github-actions +
+  cargo) to keep them current — closes the tag-repoint supply-chain risk (#15).
+- Add an MSRV job that builds on Rust 1.85 so the declared `rust-version` is
+  actually verified, not just `stable` (#29).
+- Add a `cargo doc` step with `RUSTDOCFLAGS=-D warnings` so broken doc examples
+  and dead intra-doc links fail CI (#32).
+
 ### Added
 - `ApifyClient::try_new` — fallible constructor returning `Error::Http` instead
   of panicking when the HTTP client cannot be built (#19).
@@ -36,6 +44,8 @@
 - Body-read transport errors are propagated as `Error::Http` instead of being
   silently turned into a misleading JSON parse error (#30).
 - `api_base` strips a trailing slash to avoid malformed double-slash URLs (#11).
+- Crate-level doc example uses array syntax `ApifyClient::new([…])` to match the
+  README and signal that any `IntoIterator` is accepted (#31).
 
 ## [0.1.0] - 2026-05-02
 

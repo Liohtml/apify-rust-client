@@ -31,7 +31,7 @@
 //! }
 //!
 //! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
-//! let client = ApifyClient::new(vec![std::env::var("APIFY_API_KEY")?]);
+//! let client = ApifyClient::new([std::env::var("APIFY_API_KEY")?]);
 //!
 //! let input = json!({
 //!     "searchStringsArray": ["coffee shop Berlin"],
