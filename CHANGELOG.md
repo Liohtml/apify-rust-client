@@ -11,6 +11,12 @@
 - `api_base` rejects non-HTTPS URLs (except `localhost`/`127.0.0.1`) to avoid
   transmitting credentials in plaintext (#4).
 
+### Tests
+- Add wiremock-based integration tests for the async paths: multi-key fallback
+  on 401, immediate surfacing of 404 (no rotation), retry on 429, polling
+  transitions (RUNNING→SUCCEEDED, FAILED), dataset pagination, and the
+  `max_items` cap (#16, #25).
+
 ### CI
 - Pin all GitHub Actions to commit SHAs and add Dependabot (github-actions +
   cargo) to keep them current — closes the tag-repoint supply-chain risk (#15).
