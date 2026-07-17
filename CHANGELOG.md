@@ -4,6 +4,11 @@
 
 First release published to crates.io.
 
+### Dependencies
+- Upgrade `reqwest` 0.12 → 0.13 (the `rustls-tls` feature is now named
+  `rustls`) and `thiserror` 1 → 2. Note `reqwest::Error` is exposed via
+  `Error::Http`, so downstream code matching on it must use reqwest 0.13.
+
 ### Security
 - `Debug` for `ApifyClient` and `RunHandle` is now hand-written and redacts the
   API tokens, so they no longer leak via `{:?}` / `tracing` / `dbg!` (#28, #26).

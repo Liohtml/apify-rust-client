@@ -7,11 +7,6 @@ on:
   push:
     tags:
       - "v*"
-    # TEMPORARY: publish the v0.2.0 release from this branch (tag pushes and
-    # workflow_dispatch are unavailable in the release environment). Remove
-    # after the release.
-    branches:
-      - "claude/project-analysis-crates-release-u9r8ee"
   workflow_dispatch:
 
 jobs:
@@ -31,44 +26,11 @@ jobs:
             exit 1
           fi
       - name: Publish
-        # The token is taken from the first non-empty of several commonly used
-        # secret names, so the workflow works regardless of which one the
-        # repository defines.
         env:
-          S1: ${{ secrets.CRATES_IO_TOKEN }}
-          S2: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-          S3: ${{ secrets.CRATES_TOKEN }}
-          S4: ${{ secrets.CRATESIO_TOKEN }}
-          S5: ${{ secrets.CRATES_IO_API_TOKEN }}
-          S6: ${{ secrets.CARGO_TOKEN }}
-          S7: ${{ secrets.CRATES_IO }}
-          S8: ${{ secrets.CRATES_API_TOKEN }}
-          S9: ${{ secrets.CRATES_IO_API_KEY }}
-          S10: ${{ secrets.CRATES_IO_KEY }}
-          S11: ${{ secrets.CARGO_PUBLISH_TOKEN }}
-          S12: ${{ secrets.PUBLISH_TOKEN }}
-          S13: ${{ secrets.API_TOKEN }}
-          V1: ${{ vars.CRATES_IO_TOKEN }}
-          V2: ${{ vars.CARGO_REGISTRY_TOKEN }}
-          V3: ${{ vars.CRATES_TOKEN }}
-          V4: ${{ vars.CRATESIO_TOKEN }}
-          V5: ${{ vars.CRATES_IO_API_TOKEN }}
-          V6: ${{ vars.CARGO_TOKEN }}
-          V7: ${{ vars.CRATES_IO }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
         run: |
-          names="S1 S2 S3 S4 S5 S6 S7 S8 S9 S10 S11 S12 S13 V1 V2 V3 V4 V5 V6 V7"
-          TOKEN=""
-          for name in $names; do
-            eval "val=\${$name}"
-            if [ -n "$val" ]; then
-              echo "$name: present"
-              TOKEN="${TOKEN:-$val}"
-            else
-              echo "$name: EMPTY"
-            fi
-          done
-          if [ -z "$TOKEN" ]; then
-            echo "::error::No crates.io token found in any known secret or variable name. If the token is stored in a GitHub Environment, the job needs an 'environment:' key with that environment's name."
+          if [ -z "$CARGO_REGISTRY_TOKEN" ]; then
+            echo "::error::The CRATES_IO_TOKEN repository secret is empty or missing. Add a crates.io API token under Settings → Secrets and variables → Actions → Repository secrets."
             exit 1
           fi
-          cargo publish --token "$TOKEN"
+          cargo publish
