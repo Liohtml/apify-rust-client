@@ -31,6 +31,24 @@ jobs:
             exit 1
           fi
       - name: Publish
-        run: cargo publish --token "${CARGO_REGISTRY_TOKEN}"
+        # The token is taken from the first non-empty of several commonly used
+        # secret names, so the workflow works regardless of which one the
+        # repository defines.
         env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
+          T_CRATES_IO_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
+          T_CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          T_CRATES_TOKEN: ${{ secrets.CRATES_TOKEN }}
+          T_CRATESIO_TOKEN: ${{ secrets.CRATESIO_TOKEN }}
+          T_CRATES_IO_API_TOKEN: ${{ secrets.CRATES_IO_API_TOKEN }}
+          T_CARGO_TOKEN: ${{ secrets.CARGO_TOKEN }}
+        run: |
+          for name in T_CRATES_IO_TOKEN T_CARGO_REGISTRY_TOKEN T_CRATES_TOKEN T_CRATESIO_TOKEN T_CRATES_IO_API_TOKEN T_CARGO_TOKEN; do
+            eval "val=\${$name}"
+            if [ -n "$val" ]; then echo "$name: present"; else echo "$name: EMPTY"; fi
+          done
+          TOKEN="${T_CRATES_IO_TOKEN:-${T_CARGO_REGISTRY_TOKEN:-${T_CRATES_TOKEN:-${T_CRATESIO_TOKEN:-${T_CRATES_IO_API_TOKEN:-${T_CARGO_TOKEN}}}}}}"
+          if [ -z "$TOKEN" ]; then
+            echo "::error::No crates.io token found in any known secret name (repo-level). If the token is stored in a GitHub Environment, the job needs an 'environment:' key."
+            exit 1
+          fi
+          cargo publish --token "$TOKEN"
