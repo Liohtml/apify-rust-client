@@ -35,20 +35,40 @@ jobs:
         # secret names, so the workflow works regardless of which one the
         # repository defines.
         env:
-          T_CRATES_IO_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
-          T_CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-          T_CRATES_TOKEN: ${{ secrets.CRATES_TOKEN }}
-          T_CRATESIO_TOKEN: ${{ secrets.CRATESIO_TOKEN }}
-          T_CRATES_IO_API_TOKEN: ${{ secrets.CRATES_IO_API_TOKEN }}
-          T_CARGO_TOKEN: ${{ secrets.CARGO_TOKEN }}
+          S1: ${{ secrets.CRATES_IO_TOKEN }}
+          S2: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          S3: ${{ secrets.CRATES_TOKEN }}
+          S4: ${{ secrets.CRATESIO_TOKEN }}
+          S5: ${{ secrets.CRATES_IO_API_TOKEN }}
+          S6: ${{ secrets.CARGO_TOKEN }}
+          S7: ${{ secrets.CRATES_IO }}
+          S8: ${{ secrets.CRATES_API_TOKEN }}
+          S9: ${{ secrets.CRATES_IO_API_KEY }}
+          S10: ${{ secrets.CRATES_IO_KEY }}
+          S11: ${{ secrets.CARGO_PUBLISH_TOKEN }}
+          S12: ${{ secrets.PUBLISH_TOKEN }}
+          S13: ${{ secrets.API_TOKEN }}
+          V1: ${{ vars.CRATES_IO_TOKEN }}
+          V2: ${{ vars.CARGO_REGISTRY_TOKEN }}
+          V3: ${{ vars.CRATES_TOKEN }}
+          V4: ${{ vars.CRATESIO_TOKEN }}
+          V5: ${{ vars.CRATES_IO_API_TOKEN }}
+          V6: ${{ vars.CARGO_TOKEN }}
+          V7: ${{ vars.CRATES_IO }}
         run: |
-          for name in T_CRATES_IO_TOKEN T_CARGO_REGISTRY_TOKEN T_CRATES_TOKEN T_CRATESIO_TOKEN T_CRATES_IO_API_TOKEN T_CARGO_TOKEN; do
+          names="S1 S2 S3 S4 S5 S6 S7 S8 S9 S10 S11 S12 S13 V1 V2 V3 V4 V5 V6 V7"
+          TOKEN=""
+          for name in $names; do
             eval "val=\${$name}"
-            if [ -n "$val" ]; then echo "$name: present"; else echo "$name: EMPTY"; fi
+            if [ -n "$val" ]; then
+              echo "$name: present"
+              TOKEN="${TOKEN:-$val}"
+            else
+              echo "$name: EMPTY"
+            fi
           done
-          TOKEN="${T_CRATES_IO_TOKEN:-${T_CARGO_REGISTRY_TOKEN:-${T_CRATES_TOKEN:-${T_CRATESIO_TOKEN:-${T_CRATES_IO_API_TOKEN:-${T_CARGO_TOKEN}}}}}}"
           if [ -z "$TOKEN" ]; then
-            echo "::error::No crates.io token found in any known secret name (repo-level). If the token is stored in a GitHub Environment, the job needs an 'environment:' key."
+            echo "::error::No crates.io token found in any known secret or variable name. If the token is stored in a GitHub Environment, the job needs an 'environment:' key with that environment's name."
             exit 1
           fi
           cargo publish --token "$TOKEN"
