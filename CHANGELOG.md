@@ -1,6 +1,13 @@
 # Changelog
 
-## [Unreleased]
+## [0.2.0] - 2026-07-17
+
+First release published to crates.io.
+
+### Dependencies
+- Upgrade `reqwest` 0.12 → 0.13 (the `rustls-tls` feature is now named
+  `rustls`) and `thiserror` 1 → 2. Note `reqwest::Error` is exposed via
+  `Error::Http`, so downstream code matching on it must use reqwest 0.13.
 
 ### Security
 - `Debug` for `ApifyClient` and `RunHandle` is now hand-written and redacts the
@@ -58,6 +65,8 @@
   README and signal that any `IntoIterator` is accepted (#31).
 
 ## [0.1.0] - 2026-05-02
+
+Initial version (git only — never published to crates.io).
 
 ### Added
 - Initial release.
