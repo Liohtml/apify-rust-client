@@ -25,7 +25,7 @@ Apify has hundreds of pre-built scrapers ("actors") on their [store](https://api
 
 ```toml
 [dependencies]
-apify-rust-client = "0.1"
+apify-rust-client = "0.2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

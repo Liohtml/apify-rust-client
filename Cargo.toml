@@ -1,6 +1,6 @@
 [package]
 name = "apify-rust-client"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 authors = ["Lionel Machire <lionel.machire@googlemail.com>"]
 description = "Async Rust client for the Apify Cloud API — run actors, poll status, download datasets, with multi-key fallback. Generic over any actor and dataset item type."
